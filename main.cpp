@@ -11,10 +11,7 @@
 
 using namespace std;
 
-// Официальные типы данных Huidu SDK
-typedef unsigned short huint16;
-typedef unsigned int   huint32;
-typedef signed char    hint8;
+// Используем типы данных, определенные в HDSDK.h
 
 // Определение кодов ошибок согласно официальной документации
 enum HErrorCode {
@@ -94,20 +91,34 @@ enum HcmdType {
 const huint32 LOCAL_TCP_VERSION = 0x1000007;
 
 #pragma pack(push, 1)
-// Официальная структура заголовка (HTcpHeader)
+// Официальная структура базового заголовка
 typedef struct HTcpHeader {
-    huint16 len;    ///< Длина командного пакета
+    huint16 len;    ///< Длина пакета команд
     huint16 cmd;    ///< Значение команды
 } HTcpHeader;
 
-// Официальная структура расширенного заголовка (HTcpExt)
+// Официальная структура расширенного заголовка
 typedef struct HTcpExt {
-    huint16 len;    ///< Длина командного пакета
+    huint16 len;    ///< Длина пакета команд
     huint16 cmd;    ///< Значение команды
-    // Для SDK команд за ним следуют TotalSize (4) и Index (4)
+    hint8   ext[0]; ///< Стартовый адрес расширенных данных
+} HTcpExtAsk, HTcpExtAnswer;
+
+// Структура SDK-запроса, вытекающая из документации:
+// Len(2) + Cmd(2) + Total(4) + Index(4)
+typedef struct SDKCmdAsk {
+    huint16 len;
+    huint16 cmd;
     huint32 totalSize;
     huint32 index;
-} HTcpExtAsk, HTcpExtAnswer;
+} SDKCmdAsk;
+
+// Структура пакета с ошибкой
+typedef struct ErrorPacket {
+    huint16 len;
+    huint16 cmd;
+    huint16 code;
+} ErrorPacket;
 
 // Пакет согласования версии
 struct VersionPacket {
@@ -184,17 +195,17 @@ string ToUpper(string s) {
     return s;
 }
 
-// Ручная отправка XML через сокет с использованием HTcpExt заголовока
+// Ручная отправка XML через сокет с использованием SDKCmdAsk заголовка (Len + Cmd + Total + Index)
 bool SendRawXml(SOCKET s, const string& xml) {
-    HTcpExtAsk hdr;
-    hdr.len = (huint16)(sizeof(HTcpExtAsk) + xml.size());
+    SDKCmdAsk hdr;
+    hdr.len = (huint16)(sizeof(SDKCmdAsk) + xml.size());
     hdr.cmd = kSDKCmdAsk;
     hdr.totalSize = (huint32)xml.size();
     hdr.index = 0;
 
-    printHex("Send Header (0x2003)", (char*)&hdr, sizeof(HTcpExtAsk));
+    printHex("Send Header (0x2003)", (char*)&hdr, sizeof(SDKCmdAsk));
 
-    if (send(s, (char*)&hdr, sizeof(HTcpExtAsk), 0) == SOCKET_ERROR) return false;
+    if (send(s, (char*)&hdr, sizeof(SDKCmdAsk), 0) == SOCKET_ERROR) return false;
     if (send(s, xml.c_str(), (int)xml.size(), 0) == SOCKET_ERROR) return false;
     return true;
 }
@@ -312,7 +323,13 @@ int main(int argc, char* argv[]) {
         for (const string& cmdXml : commands) {
             if (SendRawXml(s, cmdXml)) {
                 b = recv(s, buf, sizeof(buf), 0);
-                if (b > 12) {
+                if (b == 6) {
+                    huint16 resCmd = *(huint16*)(buf + 2);
+                    if (resCmd == kErrorAnswer) {
+                        huint16 errCode = *(huint16*)(buf + 4);
+                        cout << ">>> ОШИБКА ПРОТОКОЛА: " << GetErrorDescription(errCode) << " <<<" << endl;
+                    }
+                } else if (b > 12) {
                     string finalRes(buf + 12, b - 12);
                     cout << "DEBUG: Response: " << finalRes << endl;
                     
