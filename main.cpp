@@ -11,56 +11,70 @@
 
 using namespace std;
 
-// Глобальные переменные для состояния
+// Константы протокола
+const unsigned short kSDKServiceAsk = 0x2001;
+const unsigned short kSDKServiceAnswer = 0x2002;
+const unsigned short kSDKCmdAsk = 0x2003;
+const unsigned short kSDKCmdAnswer = 0x2004;
+const unsigned int LOCAL_TCP_VERSION = 0x1000007;
+
+#pragma pack(push, 1)
+struct BinaryHeader {
+    unsigned short len;
+    unsigned short cmd;
+};
+
+struct VersionPacket {
+    BinaryHeader header;
+    unsigned int version;
+};
+
+struct XmlHeader {
+    BinaryHeader header;
+    unsigned int totalSize;
+    unsigned int index;
+};
+#pragma pack(pop)
+
+// Глобальные переменные
 string g_guid = "##GUID";
 bool g_handshakeDone = false;
-string g_lastResponse;
-bool g_responseReceived = false;
 
-// Колбэк для вывода XML
-void CALLBACK readXmlCallback(const char* xml, int len, int errorCode, void* userData) {
-    string response(xml, len);
-    g_lastResponse = response;
-    g_responseReceived = true;
-    
-    // Пытаемся извлечь GUID из любого XML ответа
-    size_t guidPos = response.find("guid=\"");
-    if (guidPos != string::npos) {
-        guidPos += 6;
-        size_t endPos = response.find("\"", guidPos);
-        if (endPos != string::npos) {
-            string newGuid = response.substr(guidPos, endPos - guidPos);
-            if (newGuid != "##GUID") {
-                if (g_guid == "##GUID") {
-                    g_guid = newGuid;
-                    g_handshakeDone = true;
-                    cout << "DEBUG: SDK Handshake Successful! Session GUID: " << g_guid << endl;
-                }
-            }
-        }
+void printHex(const char* label, const char* data, int len) {
+    cout << "DEBUG: " << label << " [" << len << " bytes]: ";
+    for (int i = 0; i < len; i++) {
+        cout << hex << setw(2) << setfill('0') << (int)(unsigned char)data[i] << " ";
     }
-
-    if (errorCode != 0) {
-        cout << "DEBUG: XML Response (Error " << errorCode << "): " << response << endl;
-    } else {
-        cout << "DEBUG: XML Response: " << response << endl;
-    }
+    cout << dec << endl;
 }
 
-// Функция для отправки сырых данных (SDK -> Socket)
-HBool CALLBACK sendDataCallback(const char* data, int len, void* userData) {
-    SOCKET s = (SOCKET)userData;
-    
-    // Логируем что SDK пытается отправить
-    if (len >= 4) {
-        unsigned short cmd = *(unsigned short*)(data + 2);
-        if (cmd == 0x2001) cout << "DEBUG: SDK sending Protocol Version Negotiation (0x2001)..." << endl;
-        else if (cmd == 0x2003) cout << "DEBUG: SDK sending XML Command (0x2003)..." << endl;
-        else cout << "DEBUG: SDK sending Binary Packet (0x" << hex << cmd << dec << ")..." << endl;
-    }
+// Ручная отправка XML через сокет с заголовком 0x2003
+bool SendRawXml(SOCKET s, const string& xml) {
+    XmlHeader hdr;
+    hdr.header.len = (unsigned short)(sizeof(XmlHeader) + xml.size());
+    hdr.header.cmd = kSDKCmdAsk;
+    hdr.totalSize = (unsigned int)xml.size();
+    hdr.index = 0;
 
-    int sent = send(s, data, len, 0);
-    return (sent == len) ? HTrue : HFalse;
+    printHex("Send SDK Header (0x2003)", (char*)&hdr, sizeof(XmlHeader));
+    // cout << "DEBUG: Send XML Content: " << xml << endl;
+
+    if (send(s, (char*)&hdr, sizeof(XmlHeader), 0) == SOCKET_ERROR) return false;
+    if (send(s, xml.c_str(), (int)xml.size(), 0) == SOCKET_ERROR) return false;
+    return true;
+}
+
+// Извлечение GUID из XML ответа
+string ExtractGuid(const string& xml) {
+    size_t pos = xml.find("guid=\"");
+    if (pos != string::npos) {
+        pos += 6;
+        size_t endPos = xml.find("\"", pos);
+        if (endPos != string::npos) {
+            return xml.substr(pos, endPos - pos);
+        }
+    }
+    return "";
 }
 
 int main(int argc, char* argv[]) {
@@ -86,99 +100,83 @@ int main(int argc, char* argv[]) {
     addr.sin_port = htons(10001);
     addr.sin_addr.s_addr = inet_addr(controllerIp.c_str());
 
-    cout << "Connecting to " << controllerIp << ":10001..." << endl;
+    cout << "Connecting to " << controllerIp << ":10001 (Manual Mode)..." << endl;
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         cerr << "Connect FAILED!" << endl;
         return 1;
     }
     cout << "Connected!" << endl;
 
-    // Инициализация SDK
-    IHDProtocol sdk = CreateProtocol();
-    InitProtocol(sdk);
-    SetProtocolFunc(sdk, kSetReadXml, (void*)readXmlCallback);
-    SetProtocolFunc(sdk, kSetSendFunc, (void*)sendDataCallback);
-    SetProtocolFunc(sdk, kSetSendFuncData, (void*)s);
-
-    // Запуск протокола (SDK сам отправит 0x2001)
-    cout << "Starting SDK protocol engine..." << endl;
-    RunProtocol(sdk);
+    // --- ШАГ 1: Binary Handshake ---
+    cout << "Step 1: Binary Handshake (v0x1000007)..." << endl;
+    VersionPacket vp = {{8, kSDKServiceAsk}, LOCAL_TCP_VERSION};
+    send(s, (char*)&vp, sizeof(vp), 0);
 
     char buf[16384];
-    int timeout = 0;
-    
-    // Главный цикл обработки
-    // 1. Ждем завершения рукопожатия
-    cout << "Waiting for GUID handshake..." << endl;
-    while (!g_handshakeDone && timeout < 100) {
-        fd_set readSet;
-        FD_ZERO(&readSet);
-        FD_SET(s, &readSet);
-        timeval tv = {0, 100000}; // 100ms
-        if (select(0, &readSet, NULL, NULL, &tv) > 0) {
-            int b = recv(s, buf, sizeof(buf), 0);
-            if (b > 0) {
-                UpdateReadData(sdk, buf, b);
-            } else if (b == 0) {
-                cerr << "Connection closed by controller." << endl;
-                break;
-            }
+    int b = recv(s, buf, 8, 0); // Ждем ответ на версию
+    if (b >= 8) {
+        printHex("Recv Binary Answer", buf, b);
+        unsigned short resCmd = *(unsigned short*)(buf + 2);
+        if (resCmd == kSDKServiceAnswer) {
+            unsigned int resVer = *(unsigned int*)(buf + 4);
+            cout << "DEBUG: Binary Handshake OK. Controller Version: 0x" << hex << resVer << dec << endl;
         }
-        timeout++;
+    } else {
+        cerr << "Step 1 FAILED! No response from controller." << endl;
+        return 1;
     }
 
-    if (!g_handshakeDone) {
-        cerr << "Handshake FAILED! Timed out waiting for GUID." << endl;
+    // --- ШАГ 2: XML Handshake (GUID) ---
+    cout << "Step 2: XML GUID Handshake (GetIFVersion)..." << endl;
+    string handshakeXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"##GUID\"><in method=\"GetIFVersion\"><version value=\"1000000\"/></in></sdk>";
+    if (!SendRawXml(s, handshakeXml)) {
+        cerr << "Step 2 FAILED! Send error." << endl;
+        return 1;
+    }
+
+    b = recv(s, buf, sizeof(buf), 0);
+    if (b > 12) {
+        printHex("Recv XML Header", buf, 12);
+        string xmlResponse(buf + 12, b - 12);
+        cout << "DEBUG: XML Response: " << xmlResponse << endl;
+        string guid = ExtractGuid(xmlResponse);
+        if (!guid.empty() && guid != "##GUID") {
+            g_guid = guid;
+            g_handshakeDone = true;
+            cout << "DEBUG: SUCCESS! Session GUID: " << g_guid << endl;
+        }
     } else {
-        // 2. Выполнение команды
+        cerr << "Step 2 FAILED! No XML response." << endl;
+        return 1;
+    }
+
+    // --- ШАГ 3: Выполнение команды ---
+    if (g_handshakeDone) {
         cout << "Step 3: Sending command (" << mode << ")..." << endl;
-        
-        // Для 'set' и 'verify' используем высокоуровневый SDK Info если возможно,
-        // но RebootDevice шлем через SendXml
+        string cmdXml;
         if (mode == "reboot") {
-            string cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"RebootDevice\"/></sdk>";
-            SendXml(sdk, cmdXml.c_str(), (int)cmdXml.size());
+            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"RebootDevice\"/></sdk>";
         } else if (mode == "set") {
-            // Создаем XML вручную для надежности
-            string cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + 
-                            "\"><in method=\"SetSDKTcpServer\"><host value=\"" + serverIp + 
-                            "\"/><port value=\"" + to_string(serverPort) + "\"/></in></sdk>";
-            SendXml(sdk, cmdXml.c_str(), (int)cmdXml.size());
+            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"SetSDKTcpServer\"><host value=\"" + serverIp + "\"/><port value=\"" + to_string(serverPort) + "\"/></in></sdk>";
         } else if (mode == "verify") {
-            string cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"/></sdk>";
-            SendXml(sdk, cmdXml.c_str(), (int)cmdXml.size());
-            
-            // Также запросим DeviceInfo
-            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceInfo\"/></sdk>";
-            SendXml(sdk, cmdXml.c_str(), (int)cmdXml.size());
+            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"/></sdk>";
         }
 
-        // Ждем ответов
-        timeout = 0;
-        int expectedResponses = (mode == "verify" ? 2 : 1);
-        int receivedResponses = 0;
-        
-        while (receivedResponses < expectedResponses && timeout < 50) {
-            fd_set readSet;
-            FD_ZERO(&readSet);
-            FD_SET(s, &readSet);
-            timeval tv = {0, 100000};
-            if (select(0, &readSet, NULL, NULL, &tv) > 0) {
-                int b = recv(s, buf, sizeof(buf), 0);
-                if (b > 0) {
-                    UpdateReadData(sdk, buf, b);
-                    if (g_responseReceived) {
-                        g_responseReceived = false;
-                        receivedResponses++;
-                    }
+        if (!cmdXml.empty() && SendRawXml(s, cmdXml)) {
+            b = recv(s, buf, sizeof(buf), 0);
+            if (b > 12) {
+                string finalRes(buf + 12, b - 12);
+                cout << "DEBUG: Final Response: " << finalRes << endl;
+                if (finalRes.find("result=\"kSuccess\"") != string::npos) {
+                    cout << ">>> COMMAND COMPLETED SUCCESSFULLY! <<<" << endl;
+                } else if (finalRes.find("result=\"") != string::npos) {
+                     cout << ">>> COMMAND RETURNED ERROR! <<<" << endl;
                 }
             }
-            timeout++;
         }
     }
 
-    cout << "Application finished." << endl;
-    FreeProtocol(sdk);
+    cout << "Finished. Cleaning up..." << endl;
     closesocket(s);
     WSACleanup();
     return 0;
