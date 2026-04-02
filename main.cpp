@@ -3,15 +3,15 @@
 #include <vector>
 #include <winsock2.h>
 #include <windows.h>
-#include <HDSDK.h>
-#include <SDKInfo.h>
 #include <iomanip>
 
 #pragma comment(lib, "ws2_32.lib")
 
 using namespace std;
 
-// Используем типы данных, определенные в HDSDK.h
+typedef unsigned short huint16;
+typedef unsigned int huint32;
+typedef unsigned char huint8;
 
 // Определение кодов ошибок согласно официальной документации
 enum HErrorCode {
@@ -101,7 +101,7 @@ typedef struct HTcpHeader {
 typedef struct HTcpExt {
     huint16 len;    ///< Длина пакета команд
     huint16 cmd;    ///< Значение команды
-    hint8   ext[0]; ///< Стартовый адрес расширенных данных
+    huint8   ext[0]; ///< Стартовый адрес расширенных данных
 } HTcpExtAsk, HTcpExtAnswer;
 
 // Структура SDK-запроса, вытекающая из документации:
@@ -220,7 +220,7 @@ string ExtractGuid(const string& xml) {
         char quote = xml[pos - 1];
         size_t endPos = xml.find(quote, pos);
         if (endPos != string::npos) {
-            return ToUpper(xml.substr(pos, endPos - pos));
+            return xml.substr(pos, endPos - pos);
         }
     }
     return "";
@@ -244,12 +244,18 @@ int main(int argc, char* argv[]) {
     WSAStartup(MAKEWORD(2, 2), &wsaData);
 
     SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        cerr << "Socket creation failed" << endl;
+        WSACleanup();
+        return 1;
+    }
+
     sockaddr_in addr;
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(10001);
+    addr.sin_port = htons(20001); // ИЗМЕНЕН ПОРТ ДЛЯ A3L СЕРИИ НА 20001
     addr.sin_addr.s_addr = inet_addr(controllerIp.c_str());
 
-    cout << "Connecting to " << controllerIp << ":10001 (Official Protocol)..." << endl;
+    cout << "Connecting to " << controllerIp << ":20001 (Official BoxPlayer Port)..." << endl;
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         cerr << "Connect FAILED!" << endl;
         return 1;
@@ -257,7 +263,7 @@ int main(int argc, char* argv[]) {
     cout << "Connected!" << endl;
 
     if (mode != "json_verify") {
-        // --- ШАГ 1: Binary Handshake (HTcpHeader) ---
+        // --- ШАГ 1: Binary Handshake (HTcpHeader) - Обязателен для старого XML протокола ---
         cout << "Step 1: Binary Handshake (v0x1000007)..." << endl;
         VersionPacket vp = {{8, kSDKServiceAsk}, LOCAL_TCP_VERSION};
         send(s, (char*)&vp, sizeof(vp), 0);
@@ -290,6 +296,8 @@ int main(int argc, char* argv[]) {
             cout << "DEBUG: XML Response: " << xmlResponse << endl;
             string guid = ExtractGuid(xmlResponse);
             if (!guid.empty() && guid != "##GUID") {
+                // ВАЖНО: BoxPlayer (20001) использует GUID в нижнем регистре без тире.
+                // Не меняем регистр! Оставляем в точности как прислал контроллер.
                 g_guid = guid;
                 g_handshakeDone = true;
                 cout << "DEBUG: SUCCESS! Session GUID: " << g_guid << endl;
@@ -312,14 +320,15 @@ int main(int argc, char* argv[]) {
         int b;
         SOCKET s9528 = INVALID_SOCKET;
 
+        /* [ОТКЛЮЧЕНО] - На порту 20001 это может мешать
         if (mode != "json_verify") {
-            // [ЭКСПЕРИМЕНТАЛЬНО] Пробуем открыть порт 9528 для "авторизации" сессии XML SDK
             s9528 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             sockaddr_in addr9528 = addr;
             addr9528.sin_port = htons(9528);
             cout << "DEBUG: Attempting to open Port 9528 (Management Port)..." << endl;
             connect(s9528, (sockaddr*)&addr9528, sizeof(addr9528)); 
         }
+        */
 
         cout << "Step 3: Sending command (" << mode << ")..." << endl;
 
@@ -356,31 +365,55 @@ int main(int argc, char* argv[]) {
                                 "</sdk>";
             commands.push_back(addProgXml);
         } else if (mode == "json_verify") {
-            // СЕКРЕТНЫЙ ПРОТОКОЛ ANDROID BOXPLAYER (cmd = 0x2100)
-            string jsonAsk = "{\n"
-                             "    \"ask\": {\n"
-                             "        \"list\": [\n"
-                             "            \"NetworkInfo\",\n"
-                             "            \"CloudServer\",\n"
-                             "            \"DeviceInfo\"\n"
-                             "        ]\n"
-                             "    },\n"
-                             "    \"module\": \"Get\",\n"
-                             "    \"tag\": \"CloudServer;;NetworkInfo;;DeviceInfo\",\n"
-                             "    \"uuid\": \"{e53d9ba6-cb25-4fbc-9d4c-5dda594e9b09}\",\n"
-                             "    \"version\": 5\n"
+            // ЭТАП 1: АВТОРИЗАЦИЯ (Подделка под HDPlayer)
+            string loginJson = "{\r\n"
+                 "    \"ask\": {\r\n"
+                 "        \"Advanced\": {\r\n"
+                 "            \"deviceName\": \"BoxPlayer2\",\r\n"
+                 "            \"disableUSB\": false,\r\n"
+                 "            \"otgMode\": 1,\r\n"
+                 "            \"performanceMode\": \"\",\r\n"
+                 "            \"storageLocation\": \"local\",\r\n"
+                 "            \"voiceControl\": false\r\n"
+                 "        }\r\n"
+                 "    },\r\n"
+                 "    \"log\": \"Windows,HDPlayer,tau1k,volodya,,,_,2026-04-03_01:31:54,wireless_32769-169.254.196.44-1A:B5:CD:9B:76:C7,wireless_32772-169.254.4.142-16:B5:CD:9B:76:C7,wireless_32768-192.168.8.16-14:B5:CD:9B:76:C7,ethernet_32770-169.254.43.194-14:B5:CD:9B:76:C8,\",\r\n"
+                 "    \"module\": \"Set\",\r\n"
+                 "    \"uuid\": \"{2208a526-d57d-411a-aba8-d1f5c747ea27}\",\r\n"
+                 "    \"version\": 5\r\n"
+                 "}";
+            SDKCmdAsk hdrLogin;
+            hdrLogin.len = (huint16)(sizeof(SDKCmdAsk) + loginJson.size());
+            hdrLogin.cmd = 0x2100;
+            hdrLogin.totalSize = (huint32)loginJson.size();
+            hdrLogin.index = 0;
+            send(s, (char*)&hdrLogin, sizeof(SDKCmdAsk), 0);
+            send(s, loginJson.c_str(), (int)loginJson.size(), 0);
+            cout << "DEBUG: Sent JSON Login (Log Registry)" << endl;
+
+            // ЭТАП 2: ЗАПРОС ИНФОРМАЦИИ
+            string jsonAsk = "{\r\n"
+                             "    \"ask\": {\r\n"
+                             "        \"list\": [\r\n"
+                             "            \"NetworkInfo\",\r\n"
+                             "            \"CloudServer\",\r\n"
+                             "            \"DeviceInfo\"\r\n"
+                             "        ]\r\n"
+                             "    },\r\n"
+                             "    \"module\": \"Get\",\r\n"
+                             "    \"tag\": \"CloudServer;;NetworkInfo;;DeviceInfo\",\r\n"
+                             "    \"uuid\": \"{e53d9ba6-cb25-4fbc-9d4c-5dda594e9b09}\",\r\n"
+                             "    \"version\": 5\r\n"
                              "}";
             
             SDKCmdAsk hdr;
             hdr.len = (huint16)(sizeof(SDKCmdAsk) + jsonAsk.size());
-            hdr.cmd = 0x2100; // ПРАВИЛЬНАЯ секретная команда (0x2100, а не 0x2101)
+            hdr.cmd = 0x2100; // ПРАВИЛЬНАЯ секретная команда (0x2100)
             hdr.totalSize = (huint32)jsonAsk.size();
             hdr.index = 0;
 
-            printHex("Send JSON Header (0x2100)", (char*)&hdr, sizeof(SDKCmdAsk));
             send(s, (char*)&hdr, sizeof(SDKCmdAsk), 0);
             send(s, jsonAsk.c_str(), (int)jsonAsk.size(), 0);
-            
             cout << "DEBUG: Sent JSON Request for CloudServer & DeviceInfo" << endl;
             
             // Запускаем цикл обработки пакетов
@@ -444,7 +477,7 @@ int main(int argc, char* argv[]) {
                         huint16 resCmd = *(huint16*)(buf + 2);
                         if (resCmd == kErrorAnswer) {
                             huint16 errCode = *(huint16*)(buf + 4);
-                            cout << ">>> ОШИБКА ПРОТОКОЛА: " << GetErrorDescription(errCode) << " <<<" << endl;
+                            cout << ">>> ОШИБКА ПРОТОКОЛА: " << GetErrorDescription(errCode) << " (Код: " << errCode << ") <<<" << endl;
                         }
                     } else if (b > 12) {
                         string finalRes(buf + 12, b - 12);
