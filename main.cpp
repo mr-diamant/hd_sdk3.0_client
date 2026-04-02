@@ -57,11 +57,19 @@ bool SendRawXml(SOCKET s, const string& xml) {
     hdr.index = 0;
 
     printHex("Send SDK Header (0x2003)", (char*)&hdr, sizeof(XmlHeader));
-    // cout << "DEBUG: Send XML Content: " << xml << endl;
 
     if (send(s, (char*)&hdr, sizeof(XmlHeader), 0) == SOCKET_ERROR) return false;
     if (send(s, xml.c_str(), (int)xml.size(), 0) == SOCKET_ERROR) return false;
     return true;
+}
+
+// Удаление дефисов из GUID
+string CleanGuid(string guid) {
+    string res;
+    for (char c : guid) {
+        if (c != '-') res += c;
+    }
+    return res;
 }
 
 // Извлечение GUID из XML ответа
@@ -71,7 +79,7 @@ string ExtractGuid(const string& xml) {
         pos += 6;
         size_t endPos = xml.find("\"", pos);
         if (endPos != string::npos) {
-            return xml.substr(pos, endPos - pos);
+            return CleanGuid(xml.substr(pos, endPos - pos));
         }
     }
     return "";
@@ -113,7 +121,7 @@ int main(int argc, char* argv[]) {
     send(s, (char*)&vp, sizeof(vp), 0);
 
     char buf[16384];
-    int b = recv(s, buf, 8, 0); // Ждем ответ на версию
+    int b = recv(s, buf, 8, 0); 
     if (b >= 8) {
         printHex("Recv Binary Answer", buf, b);
         unsigned short resCmd = *(unsigned short*)(buf + 2);
@@ -153,24 +161,30 @@ int main(int argc, char* argv[]) {
     // --- ШАГ 3: Выполнение команды ---
     if (g_handshakeDone) {
         cout << "Step 3: Sending command (" << mode << ")..." << endl;
-        string cmdXml;
+        vector<string> commands;
         if (mode == "reboot") {
-            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"RebootDevice\"/></sdk>";
+            commands.push_back("<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"Reboot\" delay=\"0\"/></sdk>");
         } else if (mode == "set") {
-            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"SetSDKTcpServer\"><host value=\"" + serverIp + "\"/><port value=\"" + to_string(serverPort) + "\"/></in></sdk>";
+            commands.push_back("<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"SetSDKTcpServer\"><host value=\"" + serverIp + "\"/><port value=\"" + to_string(serverPort) + "\"/></in></sdk>");
         } else if (mode == "verify") {
-            cmdXml = "<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"/></sdk>";
+            commands.push_back("<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"/></sdk>");
+            commands.push_back("<?xml version=\"1.0\" encoding=\"utf-8\"?><sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceInfo\"/></sdk>");
         }
 
-        if (!cmdXml.empty() && SendRawXml(s, cmdXml)) {
-            b = recv(s, buf, sizeof(buf), 0);
-            if (b > 12) {
-                string finalRes(buf + 12, b - 12);
-                cout << "DEBUG: Final Response: " << finalRes << endl;
-                if (finalRes.find("result=\"kSuccess\"") != string::npos) {
-                    cout << ">>> COMMAND COMPLETED SUCCESSFULLY! <<<" << endl;
-                } else if (finalRes.find("result=\"") != string::npos) {
-                     cout << ">>> COMMAND RETURNED ERROR! <<<" << endl;
+        for (const string& cmdXml : commands) {
+            if (SendRawXml(s, cmdXml)) {
+                b = recv(s, buf, sizeof(buf), 0);
+                if (b > 12) {
+                    string finalRes(buf + 12, b - 12);
+                    cout << "DEBUG: Final Response: " << finalRes << endl;
+                    if (finalRes.find("result=\"kSuccess\"") != string::npos) {
+                        cout << ">>> COMMAND COMPLETED SUCCESSFULLY! <<<" << endl;
+                    } else if (finalRes.find("result=\"") != string::npos) {
+                         cout << ">>> COMMAND RETURNED ERROR! <<<" << endl;
+                         if (finalRes.find("kUnsupportMethod") != string::npos) {
+                             cout << "ERROR: Method was not recognized by the controller." << endl;
+                         }
+                    }
                 }
             }
         }
