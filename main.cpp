@@ -256,60 +256,72 @@ int main(int argc, char* argv[]) {
     }
     cout << "Connected!" << endl;
 
-    // --- ШАГ 1: Binary Handshake (HTcpHeader) ---
-    cout << "Step 1: Binary Handshake (v0x1000007)..." << endl;
-    VersionPacket vp = {{8, kSDKServiceAsk}, LOCAL_TCP_VERSION};
-    send(s, (char*)&vp, sizeof(vp), 0);
+    if (mode != "json_verify") {
+        // --- ШАГ 1: Binary Handshake (HTcpHeader) ---
+        cout << "Step 1: Binary Handshake (v0x1000007)..." << endl;
+        VersionPacket vp = {{8, kSDKServiceAsk}, LOCAL_TCP_VERSION};
+        send(s, (char*)&vp, sizeof(vp), 0);
 
-    char buf[16384];
-    int b = recv(s, buf, 8, 0); 
-    if (b >= 8) {
-        printHex("Recv Binary Answer", buf, b);
-        huint16 resCmd = *(huint16*)(buf + 2);
-        if (resCmd == kSDKServiceAnswer) {
-            huint32 resVer = *(huint32*)(buf + 4);
-            cout << "DEBUG: Binary Handshake OK. Controller Version: 0x" << hex << resVer << dec << endl;
+        char buf[16384];
+        int b = recv(s, buf, 8, 0); 
+        if (b >= 8) {
+            printHex("Recv Binary Answer", buf, b);
+            huint16 resCmd = *(huint16*)(buf + 2);
+            if (resCmd == kSDKServiceAnswer) {
+                huint32 resVer = *(huint32*)(buf + 4);
+                cout << "DEBUG: Binary Handshake OK. Controller Version: 0x" << hex << resVer << dec << endl;
+            }
+        } else {
+            cerr << "Step 1 FAILED!" << endl;
+            return 1;
+        }
+
+        // --- ШАГ 2: XML GUID Handshake (HTcpExt) ---
+        cout << "Step 2: XML GUID Handshake (GetIFVersion)..." << endl;
+        string handshakeXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sdk guid=\"##GUID\"><in method=\"GetIFVersion\"><version value=\"1000000\"/></in></sdk>";
+        if (!SendRawXml(s, handshakeXml)) {
+            cerr << "Step 2 FAILED!" << endl;
+            return 1;
+        }
+
+        b = recv(s, buf, sizeof(buf), 0);
+        if (b > 12) {
+            string xmlResponse(buf + 12, b - 12);
+            cout << "DEBUG: XML Response: " << xmlResponse << endl;
+            string guid = ExtractGuid(xmlResponse);
+            if (!guid.empty() && guid != "##GUID") {
+                g_guid = guid;
+                g_handshakeDone = true;
+                cout << "DEBUG: SUCCESS! Session GUID: " << g_guid << endl;
+            }
+        } else {
+            cerr << "Step 2 FAILED!" << endl;
+            return 1;
         }
     } else {
-        cerr << "Step 1 FAILED!" << endl;
-        return 1;
-    }
-
-    // --- ШАГ 2: XML GUID Handshake (HTcpExt) ---
-    cout << "Step 2: XML GUID Handshake (GetIFVersion)..." << endl;
-    string handshakeXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sdk guid=\"##GUID\"><in method=\"GetIFVersion\"><version value=\"1000000\"/></in></sdk>";
-    if (!SendRawXml(s, handshakeXml)) {
-        cerr << "Step 2 FAILED!" << endl;
-        return 1;
-    }
-
-    b = recv(s, buf, sizeof(buf), 0);
-    if (b > 12) {
-        string xmlResponse(buf + 12, b - 12);
-        cout << "DEBUG: XML Response: " << xmlResponse << endl;
-        string guid = ExtractGuid(xmlResponse);
-        if (!guid.empty() && guid != "##GUID") {
-            g_guid = guid;
-            g_handshakeDone = true;
-            cout << "DEBUG: SUCCESS! Session GUID: " << g_guid << endl;
-        }
-    } else {
-        cerr << "Step 2 FAILED!" << endl;
-        return 1;
+        // Для JSON API пропускаем старый хендшейк
+        g_handshakeDone = true;
     }
 
     // --- ШАГ 3: Выполнение команд ---
     if (g_handshakeDone) {
-        // [ЭКСПЕРИМЕНТАЛЬНО] Пробуем открыть порт 9528 для "авторизации" сессии
-        SOCKET s9528 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-        sockaddr_in addr9528 = addr;
-        addr9528.sin_port = htons(9528);
-        cout << "DEBUG: Attempting to open Port 9528 (Management Port)..." << endl;
-        connect(s9528, (sockaddr*)&addr9528, sizeof(addr9528)); 
-
-        cout << "Step 3: Sending command (" << mode << ")..." << endl;
         vector<string> commands;
         const string XML_DECL = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
+
+        char buf[16384];
+        int b;
+        SOCKET s9528 = INVALID_SOCKET;
+
+        if (mode != "json_verify") {
+            // [ЭКСПЕРИМЕНТАЛЬНО] Пробуем открыть порт 9528 для "авторизации" сессии XML SDK
+            s9528 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            sockaddr_in addr9528 = addr;
+            addr9528.sin_port = htons(9528);
+            cout << "DEBUG: Attempting to open Port 9528 (Management Port)..." << endl;
+            connect(s9528, (sockaddr*)&addr9528, sizeof(addr9528)); 
+        }
+
+        cout << "Step 3: Sending command (" << mode << ")..." << endl;
 
         if (mode == "reboot") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"Reboot\" delay=\"0\"></in></sdk>");
@@ -318,31 +330,139 @@ int main(int argc, char* argv[]) {
         } else if (mode == "verify") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"></in></sdk>");
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceInfo\"></in></sdk>");
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceName\"></in></sdk>");
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetHardwareInfo\"></in></sdk>");
+        } else if (mode == "add_program") {
+            // Тестируем точную структуру из примера документации
+            string addProgXml = XML_DECL + "<sdk guid=\"" + g_guid + "\">"
+                                "<in method=\"AddProgram\">"
+                                "<screen timeStamps=\"0\">"
+                                "<program guid=\"prog-1234\" type=\"normal\">"
+                                "<backgroundMusic/>"
+                                "<playControl count=\"1\" disabled=\"false\"/>"
+                                "<area alpha=\"255\" guid=\"area-1234\">"
+                                "<rectangle x=\"0\" height=\"128\" width=\"128\" y=\"0\"/>"
+                                "<resources>"
+                                "<text guid=\"text-1234\" singleLine=\"false\">"
+                                "<style valign=\"middle\" align=\"center\"/>"
+                                "<string>Example</string>"
+                                "<font name=\"SimSun\" italic=\"false\" bold=\"false\" underline=\"false\" size=\"28\" color=\"#ffffff\"/>"
+                                "</text>"
+                                "</resources>"
+                                "</area>"
+                                "</program>"
+                                "</screen>"
+                                "</in>"
+                                "</sdk>";
+            commands.push_back(addProgXml);
+        } else if (mode == "json_verify") {
+            // СЕКРЕТНЫЙ ПРОТОКОЛ ANDROID BOXPLAYER (cmd = 0x2100)
+            string jsonAsk = "{\n"
+                             "    \"ask\": {\n"
+                             "        \"list\": [\n"
+                             "            \"NetworkInfo\",\n"
+                             "            \"CloudServer\",\n"
+                             "            \"DeviceInfo\"\n"
+                             "        ]\n"
+                             "    },\n"
+                             "    \"module\": \"Get\",\n"
+                             "    \"tag\": \"CloudServer;;NetworkInfo;;DeviceInfo\",\n"
+                             "    \"uuid\": \"{e53d9ba6-cb25-4fbc-9d4c-5dda594e9b09}\",\n"
+                             "    \"version\": 5\n"
+                             "}";
+            
+            SDKCmdAsk hdr;
+            hdr.len = (huint16)(sizeof(SDKCmdAsk) + jsonAsk.size());
+            hdr.cmd = 0x2100; // ПРАВИЛЬНАЯ секретная команда (0x2100, а не 0x2101)
+            hdr.totalSize = (huint32)jsonAsk.size();
+            hdr.index = 0;
+
+            printHex("Send JSON Header (0x2100)", (char*)&hdr, sizeof(SDKCmdAsk));
+            send(s, (char*)&hdr, sizeof(SDKCmdAsk), 0);
+            send(s, jsonAsk.c_str(), (int)jsonAsk.size(), 0);
+            
+            cout << "DEBUG: Sent JSON Request for CloudServer & DeviceInfo" << endl;
+            
+            // Запускаем цикл обработки пакетов
+            int empty_reads = 0;
+            bool gotResponse = false;
+
+            while (empty_reads < 20 && !gotResponse) {
+                b = recv(s, buf, sizeof(buf), 0);
+                if (b > 0) {
+                    empty_reads = 0;
+                    int offset = 0;
+                    
+                    while (offset + 4 <= b) {
+                        huint16 pLen = *(huint16*)(buf + offset);
+                        huint16 pCmd = *(huint16*)(buf + offset + 2);
+
+                        // Ждем пока докачается весь пакет (простейшая обработка фрагментации TCP)
+                        while (offset + pLen > b) {
+                            int b2 = recv(s, buf + b, sizeof(buf) - b, 0);
+                            if (b2 > 0) b += b2;
+                            else break;
+                        }
+
+                        if (pCmd == kTcpHeartbeatAsk) {
+                            cout << "DEBUG: Recv Heartbeat Ask (0x005f). Sending Answer (0x0060)..." << endl;
+                            HTcpHeader ans;
+                            ans.len = 4;
+                            ans.cmd = kTcpHeartbeatAnswer;
+                            send(s, (char*)&ans, 4, 0);
+                        } else {
+                            cout << "DEBUG: Recv Packet: len=" << pLen << " cmd=0x" << hex << pCmd << dec << endl;
+                            if (pLen > 12) {
+                                string finalRes(buf + offset + 12, pLen - 12);
+                                cout << ">>> JSON RESPONSE <<<" << endl << finalRes << endl;
+                                gotResponse = true;
+                            } else {
+                                printHex("Unknown Packet", buf + offset, pLen);
+                            }
+                        }
+                        
+                        offset += pLen;
+                        if (pLen == 0) break; // Защита от бесконечного цикла
+                    }
+                } else {
+                    empty_reads++;
+                    Sleep(100);
+                }
+            }
+            
+            if (!gotResponse) {
+                cout << ">>> ОШИБКА: Превышено время ожидания ответа <<<" << endl;
+            }
         }
 
-        for (const string& cmdXml : commands) {
-            if (SendRawXml(s, cmdXml)) {
-                b = recv(s, buf, sizeof(buf), 0);
-                if (b == 6) {
-                    huint16 resCmd = *(huint16*)(buf + 2);
-                    if (resCmd == kErrorAnswer) {
-                        huint16 errCode = *(huint16*)(buf + 4);
-                        cout << ">>> ОШИБКА ПРОТОКОЛА: " << GetErrorDescription(errCode) << " <<<" << endl;
-                    }
-                } else if (b > 12) {
-                    string finalRes(buf + 12, b - 12);
-                    cout << "DEBUG: Response: " << finalRes << endl;
-                    
-                    string status = FindErrorInXml(finalRes);
-                    if (status == "Успех") {
-                        cout << ">>> SUCCESS! <<<" << endl;
-                    } else {
-                        cout << ">>> ОШИБКА: " << status << " <<<" << endl;
+        // Блок отправки XML-команд (если это не json_verify)
+        if (mode != "json_verify") {
+            for (const string& cmdXml : commands) {
+                if (SendRawXml(s, cmdXml)) {
+                    b = recv(s, buf, sizeof(buf), 0);
+                    if (b == 6) {
+                        huint16 resCmd = *(huint16*)(buf + 2);
+                        if (resCmd == kErrorAnswer) {
+                            huint16 errCode = *(huint16*)(buf + 4);
+                            cout << ">>> ОШИБКА ПРОТОКОЛА: " << GetErrorDescription(errCode) << " <<<" << endl;
+                        }
+                    } else if (b > 12) {
+                        string finalRes(buf + 12, b - 12);
+                        cout << "DEBUG: Response: " << finalRes << endl;
+                        
+                        string status = FindErrorInXml(finalRes);
+                        if (status == "Успех") {
+                            cout << ">>> SUCCESS! <<<" << endl;
+                        } else {
+                            cout << ">>> ОШИБКА: " << status << " <<<" << endl;
+                        }
                     }
                 }
             }
         }
-        closesocket(s9528);
+        if (s9528 != INVALID_SOCKET) {
+            closesocket(s9528);
+        }
     }
 
     cout << "Finished. Cleaning up..." << endl;
