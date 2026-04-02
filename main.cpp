@@ -11,6 +11,11 @@
 
 using namespace std;
 
+// Официальные типы данных Huidu SDK
+typedef unsigned short huint16;
+typedef unsigned int   huint32;
+typedef signed char    hint8;
+
 // Определение кодов ошибок согласно официальной документации
 enum HErrorCode {
     kSuccess = 0,            ///< Успех (нормальное состояние)
@@ -64,6 +69,57 @@ enum HErrorCode {
     kUnsupportDeviceType,    ///< Модель устройства не поддерживается данным SDK
 };
 
+// Типы команд протокола согласно официальной спецификации
+enum HcmdType {
+    kTcpHeartbeatAsk        = 0x005f,   ///< Запрос TCP Heartbeat (пульс)
+    kTcpHeartbeatAnswer     = 0x0060,   ///< Ответ на TCP Heartbeat
+    kSearchDeviceAsk        = 0x1001,   ///< Запрос поиска устройств
+    kSearchDeviceAnswer     = 0x1002,   ///< Ответ на поиск устройств
+    kErrorAnswer            = 0x2000,   ///< Сообщение об ошибке (бинарное)
+    kSDKServiceAsk          = 0x2001,   ///< Запрос согласования версии SDK
+    kSDKServiceAnswer       = 0x2002,   ///< Ответ на согласование версии SDK
+    kSDKCmdAsk              = 0x2003,   ///< Запрос XML SDK команды
+    kSDKCmdAnswer           = 0x2004,   ///< Ответ на XML SDK команду
+    kGPSInfoAnswer          = 0x3007,   ///< Ответ с информацией GPS
+    kFileStartAsk           = 0x8001,   ///< Запрос начала передачи файла
+    kFileStartAnswer        = 0x8002,   ///< Ответ на начало передачи файла
+    kFileContentAsk         = 0x8003,   ///< Пакет с содержимым файла
+    kFileContentAnswer      = 0x8004,   ///< Ответ на запись содержимого файла
+    kFileEndAsk             = 0x8005,   ///< Запрос завершения передачи файла
+    kFileEndAnswer          = 0x8006,   ///< Ответ на завершение передачи файла
+    kReadFileAsk            = 0x8007,   ///< Запрос чтения файла с устройства
+    kReadFileAnswer         = 0x8008,   ///< Ответ на чтение файла
+};
+
+const huint32 LOCAL_TCP_VERSION = 0x1000007;
+
+#pragma pack(push, 1)
+// Официальная структура заголовка (HTcpHeader)
+typedef struct HTcpHeader {
+    huint16 len;    ///< Длина командного пакета
+    huint16 cmd;    ///< Значение команды
+} HTcpHeader;
+
+// Официальная структура расширенного заголовка (HTcpExt)
+typedef struct HTcpExt {
+    huint16 len;    ///< Длина командного пакета
+    huint16 cmd;    ///< Значение команды
+    // Для SDK команд за ним следуют TotalSize (4) и Index (4)
+    huint32 totalSize;
+    huint32 index;
+} HTcpExtAsk, HTcpExtAnswer;
+
+// Пакет согласования версии
+struct VersionPacket {
+    HTcpHeader header;
+    huint32 version;
+};
+#pragma pack(pop)
+
+// Глобальные переменные
+string g_guid = "##GUID";
+bool g_handshakeDone = false;
+
 // Функция получения текстового описания ошибки по коду
 const char* GetErrorDescription(int code) {
     switch (code) {
@@ -100,57 +156,11 @@ const char* GetErrorDescription(int code) {
     }
 }
 
-// Типы команд протокола согласно официальной спецификации
-enum HcmdType {
-    kTcpHeartbeatAsk        = 0x005f,   ///< Запрос TCP Heartbeat (пульс)
-    kTcpHeartbeatAnswer     = 0x0060,   ///< Ответ на TCP Heartbeat
-    kSearchDeviceAsk        = 0x1001,   ///< Запрос поиска устройств
-    kSearchDeviceAnswer     = 0x1002,   ///< Ответ на поиск устройств
-    kErrorAnswer            = 0x2000,   ///< Сообщение об ошибке (бинарное)
-    kSDKServiceAsk          = 0x2001,   ///< Запрос согласования версии SDK
-    kSDKServiceAnswer       = 0x2002,   ///< Ответ на согласование версии SDK
-    kSDKCmdAsk              = 0x2003,   ///< Запрос XML SDK команды
-    kSDKCmdAnswer           = 0x2004,   ///< Ответ на XML SDK команду
-    kGPSInfoAnswer          = 0x3007,   ///< Ответ с информацией GPS
-    kFileStartAsk           = 0x8001,   ///< Запрос начала передачи файла
-    kFileStartAnswer        = 0x8002,   ///< Ответ на начало передачи файла
-    kFileContentAsk         = 0x8003,   ///< Пакет с содержимым файла
-    kFileContentAnswer      = 0x8004,   ///< Ответ на запись содержимого файла
-    kFileEndAsk             = 0x8005,   ///< Запрос завершения передачи файла
-    kFileEndAnswer          = 0x8006,   ///< Ответ на завершение передачи файла
-    kReadFileAsk            = 0x8007,   ///< Запрос чтения файла с устройства
-    kReadFileAnswer         = 0x8008,   ///< Ответ на чтение файла
-};
-const unsigned int LOCAL_TCP_VERSION = 0x1000007;
-
-#pragma pack(push, 1)
-struct BinaryHeader {
-    unsigned short len;
-    unsigned short cmd;
-};
-
-struct VersionPacket {
-    BinaryHeader header;
-    unsigned int version;
-};
-
-struct XmlHeader {
-    BinaryHeader header;
-    unsigned int totalSize;
-    unsigned int index;
-};
-#pragma pack(pop)
-
-// Глобальные переменные
-string g_guid = "##GUID";
-bool g_handshakeDone = false;
-
 // Вспомогательная функция для поиска описания ошибки в XML
 string FindErrorInXml(const string& xml) {
     if (xml.find("result=\"kSuccess\"") != string::npos || xml.find("result='kSuccess'") != string::npos) 
         return "Успех";
     
-    // Список часто встречающихся ошибок для маппинга
     if (xml.find("kUnsupportMethod") != string::npos) return GetErrorDescription(kUnsupportMethod);
     if (xml.find("kInvalidGUID") != string::npos) return GetErrorDescription(kInvalidGUID);
     if (xml.find("kParseXmlFailed") != string::npos) return GetErrorDescription(kParseXmlFailed);
@@ -174,17 +184,17 @@ string ToUpper(string s) {
     return s;
 }
 
-// Ручная отправка XML через сокет с 12-байтовым заголовком 0x2003
+// Ручная отправка XML через сокет с использованием HTcpExt заголовока
 bool SendRawXml(SOCKET s, const string& xml) {
-    XmlHeader hdr;
-    hdr.header.len = (unsigned short)(sizeof(XmlHeader) + xml.size());
-    hdr.header.cmd = kSDKCmdAsk;
-    hdr.totalSize = (unsigned int)xml.size();
+    HTcpExtAsk hdr;
+    hdr.len = (huint16)(sizeof(HTcpExtAsk) + xml.size());
+    hdr.cmd = kSDKCmdAsk;
+    hdr.totalSize = (huint32)xml.size();
     hdr.index = 0;
 
-    printHex("Send Header (0x2003)", (char*)&hdr, sizeof(XmlHeader));
+    printHex("Send Header (0x2003)", (char*)&hdr, sizeof(HTcpExtAsk));
 
-    if (send(s, (char*)&hdr, sizeof(XmlHeader), 0) == SOCKET_ERROR) return false;
+    if (send(s, (char*)&hdr, sizeof(HTcpExtAsk), 0) == SOCKET_ERROR) return false;
     if (send(s, xml.c_str(), (int)xml.size(), 0) == SOCKET_ERROR) return false;
     return true;
 }
@@ -228,14 +238,14 @@ int main(int argc, char* argv[]) {
     addr.sin_port = htons(10001);
     addr.sin_addr.s_addr = inet_addr(controllerIp.c_str());
 
-    cout << "Connecting to " << controllerIp << ":10001 (Strict Protocol)..." << endl;
+    cout << "Connecting to " << controllerIp << ":10001 (Official Protocol)..." << endl;
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         cerr << "Connect FAILED!" << endl;
         return 1;
     }
     cout << "Connected!" << endl;
 
-    // --- ШАГ 1: Binary Handshake ---
+    // --- ШАГ 1: Binary Handshake (HTcpHeader) ---
     cout << "Step 1: Binary Handshake (v0x1000007)..." << endl;
     VersionPacket vp = {{8, kSDKServiceAsk}, LOCAL_TCP_VERSION};
     send(s, (char*)&vp, sizeof(vp), 0);
@@ -244,9 +254,9 @@ int main(int argc, char* argv[]) {
     int b = recv(s, buf, 8, 0); 
     if (b >= 8) {
         printHex("Recv Binary Answer", buf, b);
-        unsigned short resCmd = *(unsigned short*)(buf + 2);
+        huint16 resCmd = *(huint16*)(buf + 2);
         if (resCmd == kSDKServiceAnswer) {
-            unsigned int resVer = *(unsigned int*)(buf + 4);
+            huint32 resVer = *(huint32*)(buf + 4);
             cout << "DEBUG: Binary Handshake OK. Controller Version: 0x" << hex << resVer << dec << endl;
         }
     } else {
@@ -254,7 +264,7 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // --- ШАГ 2: XML GUID Handshake ---
+    // --- ШАГ 2: XML GUID Handshake (HTcpExt) ---
     cout << "Step 2: XML GUID Handshake (GetIFVersion)..." << endl;
     string handshakeXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sdk guid=\"##GUID\"><in method=\"GetIFVersion\"><version value=\"1000000\"/></in></sdk>";
     if (!SendRawXml(s, handshakeXml)) {
