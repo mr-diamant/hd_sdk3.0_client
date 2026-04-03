@@ -203,7 +203,7 @@ bool SendRawXml(SOCKET s, const string& xml) {
     hdr.totalSize = (huint32)xml.size();
     hdr.index = 0;
 
-    printHex("Send Header (0x2003)", (char*)&hdr, sizeof(SDKCmdAsk));
+    // printHex("Send Header (0x2003)", (char*)&hdr, sizeof(SDKCmdAsk)); // ОТКЛЮЧАЕМ ВЫВОД
 
     if (send(s, (char*)&hdr, sizeof(SDKCmdAsk), 0) == SOCKET_ERROR) return false;
     if (send(s, xml.c_str(), (int)xml.size(), 0) == SOCKET_ERROR) return false;
@@ -226,12 +226,37 @@ string ExtractGuid(const string& xml) {
     return "";
 }
 
+string ExtractXMLAttr(const string& xml, const string& tag, const string& attr) {
+    size_t tagPos = xml.find("<" + tag);
+    if (tagPos == string::npos) return "";
+    size_t attrPos = xml.find(attr + "=\"", tagPos);
+    if (attrPos == string::npos) return "";
+    attrPos += attr.length() + 2;
+    size_t endPos = xml.find("\"", attrPos);
+    return xml.substr(attrPos, endPos - attrPos);
+}
+
 int main(int argc, char* argv[]) {
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
 
+    if (argc >= 2 && (string(argv[1]) == "--help" || string(argv[1]) == "-h" || string(argv[1]) == "help")) {
+        cout << "HDServerConfig - LED Controller Management Utility (HD-A3L / SDK 3.0)" << endl;
+        cout << "Usage: HDServerConfig.exe <command> <controller_ip> [params...]" << endl << endl;
+        cout << "Commands:" << endl;
+        cout << "  verify <IP>\t\t\tGet device info, model, and current server settings" << endl;
+        cout << "  set <IP> <ServerIP> <Port>\tSet the Cloud Server IP and Port" << endl;
+        cout << "  reboot <IP>\t\t\tReboot the controller" << endl;
+        cout << "  add_program <IP>\t\tSend an example program (text) to the screen" << endl;
+        cout << "  clear <IP>\t\t\tClear all programs from the screen" << endl;
+        cout << "  screen_off <IP>\t\tTurn off the LED screen" << endl;
+        cout << "  screen_on <IP>\t\tTurn on the LED screen" << endl;
+        cout << "  json_verify <IP>\t\t[Deprecated] Run the internal Port 10001 JSON verification" << endl;
+        return 0;
+    }
+
     if (argc < 3) {
-        cout << "Usage: HDServerConfig.exe <mode> <controller_ip> [params...]" << endl;
+        cout << "Usage: HDServerConfig.exe <command> <controller_ip> [params...]\nRun 'HDServerConfig.exe --help' for a full list of commands." << endl;
         return 1;
     }
 
@@ -255,35 +280,26 @@ int main(int argc, char* argv[]) {
     addr.sin_port = htons(20001); // ИЗМЕНЕН ПОРТ ДЛЯ A3L СЕРИИ НА 20001
     addr.sin_addr.s_addr = inet_addr(controllerIp.c_str());
 
-    cout << "Connecting to " << controllerIp << ":20001 (Official BoxPlayer Port)..." << endl;
     if (connect(s, (sockaddr*)&addr, sizeof(addr)) == SOCKET_ERROR) {
         cerr << "Connect FAILED!" << endl;
         return 1;
     }
-    cout << "Connected!" << endl;
 
     if (mode != "json_verify") {
         // --- ШАГ 1: Binary Handshake (HTcpHeader) - Обязателен для старого XML протокола ---
-        cout << "Step 1: Binary Handshake (v0x1000007)..." << endl;
         VersionPacket vp = {{8, kSDKServiceAsk}, LOCAL_TCP_VERSION};
         send(s, (char*)&vp, sizeof(vp), 0);
 
         char buf[16384];
         int b = recv(s, buf, 8, 0); 
         if (b >= 8) {
-            printHex("Recv Binary Answer", buf, b);
-            huint16 resCmd = *(huint16*)(buf + 2);
-            if (resCmd == kSDKServiceAnswer) {
-                huint32 resVer = *(huint32*)(buf + 4);
-                cout << "DEBUG: Binary Handshake OK. Controller Version: 0x" << hex << resVer << dec << endl;
-            }
+            // Handshake OK
         } else {
             cerr << "Step 1 FAILED!" << endl;
             return 1;
         }
 
         // --- ШАГ 2: XML GUID Handshake (HTcpExt) ---
-        cout << "Step 2: XML GUID Handshake (GetIFVersion)..." << endl;
         string handshakeXml = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><sdk guid=\"##GUID\"><in method=\"GetIFVersion\"><version value=\"1000000\"/></in></sdk>";
         if (!SendRawXml(s, handshakeXml)) {
             cerr << "Step 2 FAILED!" << endl;
@@ -293,14 +309,12 @@ int main(int argc, char* argv[]) {
         b = recv(s, buf, sizeof(buf), 0);
         if (b > 12) {
             string xmlResponse(buf + 12, b - 12);
-            cout << "DEBUG: XML Response: " << xmlResponse << endl;
             string guid = ExtractGuid(xmlResponse);
             if (!guid.empty() && guid != "##GUID") {
                 // ВАЖНО: BoxPlayer (20001) использует GUID в нижнем регистре без тире.
                 // Не меняем регистр! Оставляем в точности как прислал контроллер.
                 g_guid = guid;
                 g_handshakeDone = true;
-                cout << "DEBUG: SUCCESS! Session GUID: " << g_guid << endl;
             }
         } else {
             cerr << "Step 2 FAILED!" << endl;
@@ -325,22 +339,18 @@ int main(int argc, char* argv[]) {
             s9528 = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
             sockaddr_in addr9528 = addr;
             addr9528.sin_port = htons(9528);
-            cout << "DEBUG: Attempting to open Port 9528 (Management Port)..." << endl;
             connect(s9528, (sockaddr*)&addr9528, sizeof(addr9528)); 
         }
         */
 
-        cout << "Step 3: Sending command (" << mode << ")..." << endl;
-
         if (mode == "reboot") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"Reboot\" delay=\"0\"></in></sdk>");
         } else if (mode == "set") {
-            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SetSDKTcpServer\"><host value=\"" + serverIp + "\"/><port value=\"" + to_string(serverPort) + "\"/></in></sdk>");
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SetSDKTcpServer\"><server port=\"" + to_string(serverPort) + "\" host=\"" + serverIp + "\"/></in></sdk>");
         } else if (mode == "verify") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"></in></sdk>");
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceInfo\"></in></sdk>");
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceName\"></in></sdk>");
-            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetHardwareInfo\"></in></sdk>");
         } else if (mode == "add_program") {
             // Тестируем точную структуру из примера документации
             string addProgXml = XML_DECL + "<sdk guid=\"" + g_guid + "\">"
@@ -364,6 +374,12 @@ int main(int argc, char* argv[]) {
                                 "</in>"
                                 "</sdk>";
             commands.push_back(addProgXml);
+        } else if (mode == "clear") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"ClearProgram\"></in></sdk>");
+        } else if (mode == "screen_on") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SwitchScreen\"><screen on=\"true\"/></in></sdk>");
+        } else if (mode == "screen_off") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SwitchScreen\"><screen on=\"false\"/></in></sdk>");
         } else if (mode == "json_verify") {
             // ЭТАП 1: АВТОРИЗАЦИЯ (Подделка под HDPlayer)
             string loginJson = "{\r\n"
@@ -477,17 +493,33 @@ int main(int argc, char* argv[]) {
                         huint16 resCmd = *(huint16*)(buf + 2);
                         if (resCmd == kErrorAnswer) {
                             huint16 errCode = *(huint16*)(buf + 4);
-                            cout << ">>> ОШИБКА ПРОТОКОЛА: " << GetErrorDescription(errCode) << " (Код: " << errCode << ") <<<" << endl;
+                            cout << ">>> ERROR: " << GetErrorDescription(errCode) << " (Code: " << errCode << ") <<<" << endl;
                         }
                     } else if (b > 12) {
                         string finalRes(buf + 12, b - 12);
-                        cout << "DEBUG: Response: " << finalRes << endl;
-                        
                         string status = FindErrorInXml(finalRes);
                         if (status == "Успех") {
-                            cout << ">>> SUCCESS! <<<" << endl;
+                            // Форматированный вывод
+                            if (cmdXml.find("GetSDKTcpServer") != string::npos) {
+                                string outHost = ExtractXMLAttr(finalRes, "server", "host");
+                                string outPort = ExtractXMLAttr(finalRes, "server", "port");
+                                if (outHost.empty()) cout << "[Server Config] No Cloud Server connected." << endl;
+                                else cout << "[Server Config] IP: " << outHost << " Port: " << outPort << endl;
+                            } else if (cmdXml.find("GetDeviceInfo") != string::npos) {
+                                string devId = ExtractXMLAttr(finalRes, "device", "id");
+                                string devCpu = ExtractXMLAttr(finalRes, "device", "cpu");
+                                string outWidth = ExtractXMLAttr(finalRes, "screen", "width");
+                                string outHeight = ExtractXMLAttr(finalRes, "screen", "height");
+                                cout << "[Device Info] Model: " << devId << " (CPU: " << devCpu << ")" << endl;
+                                cout << "[Screen Size] " << outWidth << "x" << outHeight << endl;
+                            } else if (cmdXml.find("GetDeviceName") != string::npos) {
+                                string devName = ExtractXMLAttr(finalRes, "name", "value");
+                                cout << "[Device Name] " << devName << endl;
+                            } else {
+                                cout << "[Success] Command completed." << endl;
+                            }
                         } else {
-                            cout << ">>> ОШИБКА: " << status << " <<<" << endl;
+                            cout << ">>> ERROR: " << status << " <<<" << endl;
                         }
                     }
                 }
@@ -498,7 +530,6 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    cout << "Finished. Cleaning up..." << endl;
     closesocket(s);
     WSACleanup();
     return 0;
