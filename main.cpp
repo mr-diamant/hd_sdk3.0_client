@@ -169,6 +169,26 @@ const char* GetErrorDescription(int code) {
     }
 }
 
+// Вспомогательная функция декодирования Base64
+vector<unsigned char> Base64Decode(const string& input) {
+    static const string base64_chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+
+    vector<unsigned char> out;
+    int val = 0, valb = -8;
+    for (unsigned char c : input) {
+        if (T[c] == -1) continue;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            out.push_back(char((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return out;
+}
+
 // Вспомогательная функция для поиска описания ошибки в XML
 string FindErrorInXml(const string& xml) {
     if (xml.find("result=\"kSuccess\"") != string::npos || xml.find("result='kSuccess'") != string::npos) 
@@ -247,7 +267,11 @@ int main(int argc, char* argv[]) {
         cout << "Usage: HDServerConfig.exe <command> <controller_ip> [params...]" << endl << endl;
         cout << "Commands:" << endl;
         cout << "  verify <IP>\t\t\tGet full device info (Model, RAM, Flash, Version, Server)" << endl;
-        cout << "  list_files <IP>\t\tList all files (images, videos, fonts, etc.)" << endl;
+        cout << "  screenshot <IP> [file]\tCapture screen and save as JPG (GetScreenshot2)" << endl;
+        cout << "  list_files <IP> [type]\tList raw media files (optional type: 0-image, 1-video, 6-proj)" << endl;
+        cout << "  scan_files <IP>\t\tScan all file categories (0,1,6,8,128,129) and log results" << endl;
+        cout << "  raw_cmd <IP> <Method>\t\tSend a custom XML method (e.g., GetTaskInfo)" << endl;
+        cout << "  list_playlist <IP>\t\tList current playlist" << endl;
         cout << "  set <IP> <ServerIP> <Port>\tSet the Cloud Server IP and Port" << endl;
         cout << "  reboot <IP>\t\t\tReboot the controller" << endl;
         cout << "  on/off <IP>\t\t\tTurn screen ON or OFF" << endl;
@@ -273,10 +297,16 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         controllerIp = argv[3];
-    } else if (mode == "on" || mode == "off" || mode == "list_files") {
+    } else if (mode == "on" || mode == "off" || mode == "list_files" || mode == "list_programs" || mode == "list_playlist" || mode == "scan_files" || mode == "screenshot") {
         if (argc < 3) {
-            cout << "Usage: HDServerConfig.exe " << mode << " <controller_ip>" << endl;
+            cout << "Usage: HDServerConfig.exe " << mode << " <controller_ip> [params...]" << endl;
             return 1;
+        }
+        controllerIp = argv[2];
+    } else if (mode == "raw_cmd") {
+        if (argc < 4) {
+             cout << "Usage: HDServerConfig.exe raw_cmd <controller_ip> <MethodName>" << endl;
+             return 1;
         }
         controllerIp = argv[2];
     } else {
@@ -374,7 +404,26 @@ int main(int argc, char* argv[]) {
         } else if (mode == "off") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"CloseScreen\"></in></sdk>");
         } else if (mode == "list_files") {
-            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetFiles\"></in></sdk>");
+            string type = (argc > 3) ? argv[3] : "";
+            if (type.empty()) {
+                commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetFiles\"></in></sdk>");
+            } else {
+                commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetFiles\" type=\"" + type + "\"></in></sdk>");
+            }
+        } else if (mode == "list_playlist") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetPlayList\"></in></sdk>");
+        } else if (mode == "list_programs") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetPrograms\"></in></sdk>");
+        } else if (mode == "screenshot") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetScreenshot2\"><image width=\"0\" height=\"0\"/></in></sdk>");
+        } else if (mode == "scan_files") {
+            vector<string> types = {"0", "1", "6", "8", "128", "129"};
+            for (auto t : types) {
+                commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetFiles\" type=\"" + t + "\"></in></sdk>");
+            }
+        } else if (mode == "raw_cmd") {
+            string method = (argc > 3) ? argv[3] : "";
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"" + method + "\"></in></sdk>");
         } else if (mode == "bright") {
             string val = argv[2];
             if (val == "-get") {
@@ -560,21 +609,40 @@ int main(int argc, char* argv[]) {
                                 string devName = ExtractXMLAttr(finalRes, "name", "value");
                                 cout << "[Device Name] " << devName << endl;
                             } else if (cmdXml.find("GetFiles") != string::npos) {
+                                // Сохраняем сырой ответ в лог-файл
+                                ofstream logFile("sdk_debug.log", ios::app);
+                                if (logFile.is_open()) {
+                                    logFile << "\n--- [GetFiles Raw Response] ---\n" << finalRes << "\n-----------------------------\n" << endl;
+                                    logFile.close();
+                                    cout << "[Debug] Raw response saved to sdk_debug.log" << endl;
+                                }
+
                                 cout << "[Files List]" << endl;
                                 cout << left << setw(30) << "Name" << setw(12) << "Size(KB)" << setw(10) << "Type" << "MD5" << endl;
                                 cout << string(80, '-') << endl;
 
                                 size_t pos = 0;
                                 int count = 0;
-                                while ((pos = finalRes.find("<file ", pos)) != string::npos) {
-                                    size_t endPos = finalRes.find("/>", pos);
-                                    if (endPos == string::npos) break;
-                                    string fileTag = finalRes.substr(pos, endPos - pos + 2);
+                                // Более гибкий поиск тега <file (регистронезависимость не в C++11 по умолчанию, но ищем просто <file)
+                                string lowerRes = finalRes;
+                                for(auto &c : lowerRes) c = tolower((unsigned char)c);
 
+                                while ((pos = lowerRes.find("<file", pos)) != string::npos) {
+                                    size_t tagEnd = lowerRes.find(">", pos);
+                                    if (tagEnd == string::npos) break;
+                                    
+                                    string fileTag = finalRes.substr(pos, tagEnd - pos + 1);
+                                    
+                                    // Используем существующий ExtractXMLAttr, он ищет внутри строки
                                     string name = ExtractXMLAttr(fileTag, "file", "name");
+                                    if (name.empty()) name = ExtractXMLAttr(fileTag, "file", "Name"); // на всякий случай
+
                                     string size = ExtractXMLAttr(fileTag, "file", "size");
+                                    if (size.empty()) size = ExtractXMLAttr(fileTag, "file", "Size");
+
                                     string type = ExtractXMLAttr(fileTag, "file", "type");
                                     string md5 = ExtractXMLAttr(fileTag, "file", "md5");
+                                    if (md5.empty()) md5 = ExtractXMLAttr(fileTag, "file", "MD5");
 
                                     // Расшифровка типов
                                     string typeStr = "Other";
@@ -587,13 +655,102 @@ int main(int argc, char* argv[]) {
                                     else if (type == "6") typeStr = "Resources";
 
                                     long sizeKb = (size.empty() ? 0 : stol(size)) / 1024;
-                                    cout << left << setw(30) << name << setw(12) << sizeKb << setw(10) << typeStr << md5 << endl;
+                                    if (!name.empty()) {
+                                        cout << left << setw(30) << name << setw(12) << sizeKb << setw(10) << typeStr << md5 << endl;
+                                        count++;
+                                    }
                                     
-                                    pos = endPos;
-                                    count++;
+                                    pos = tagEnd + 1;
                                 }
                                 if (count == 0) cout << "(No files found)" << endl;
                                 else cout << "Total files: " << count << endl;
+                            } else if (cmdXml.find("GetPlayList") != string::npos) {
+                                ofstream logFile("sdk_debug.log", ios::app);
+                                if (logFile.is_open()) {
+                                    logFile << "\n--- [GetPlayList Raw Response] ---\n" << finalRes << "\n-----------------------------\n" << endl;
+                                    logFile.close();
+                                    cout << "[Debug] Raw response saved to sdk_debug.log" << endl;
+                                }
+                                cout << "[Playlist Info]" << endl << finalRes << endl;
+                            } else if (cmdXml.find("GetPrograms") != string::npos) {
+                                // Логируем ответ
+                                ofstream logFile("sdk_debug.log", ios::app);
+                                if (logFile.is_open()) {
+                                    logFile << "\n--- [GetPrograms Raw Response] ---\n" << finalRes << "\n-----------------------------\n" << endl;
+                                    logFile.close();
+                                    cout << "[Debug] Raw response saved to sdk_debug.log" << endl;
+                                }
+                                cout << "[Programs Info]" << endl << finalRes << endl;
+                            } else if (cmdXml.find("GetScreenshot2") != string::npos || cmdXml.find("ScreenShot") != string::npos) {
+                                // Обработка скриншота (может быть в GetScreenshot2 или ScreenShot)
+                                string imgData = ExtractXMLAttr(finalRes, "image", "data");
+                                if (imgData.empty()) imgData = ExtractXMLAttr(finalRes, "screenshot", "image"); // для ScreenShot
+
+                                if (!imgData.empty()) {
+                                    string outName = "screenshot.jpg";
+                                    if (argc > 3 && mode == "screenshot") outName = argv[3];
+
+                                    vector<unsigned char> jpg = Base64Decode(imgData);
+                                    if (!jpg.empty()) {
+                                        ofstream outFile(outName, ios::binary);
+                                        if (outFile.is_open()) {
+                                            outFile.write((const char*)jpg.data(), jpg.size());
+                                            outFile.close();
+                                            cout << "[Success] Screenshot saved to: " << outName << " (" << jpg.size() << " bytes)" << endl;
+                                        } else {
+                                             cout << ">>> ERROR: Field to create file " << outName << " <<<" << endl;
+                                        }
+                                    } else {
+                                        cout << ">>> ERROR: Base64 decode failed <<<" << endl;
+                                    }
+                                } else {
+                                    // Fallback: если GetScreenshot2 не поддерживается, пробуем старый ScreenShot сразу
+                                    if (cmdXml.find("GetScreenshot2") != string::npos && finalRes.find("kUnsupportMethod") != string::npos) {
+                                        cout << "[Info] GetScreenshot2 not supported, trying legacy ScreenShot..." << endl;
+                                        string legacyXml = XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"ScreenShot\" /></sdk>";
+                                        if (SendRawXml(s, legacyXml)) {
+                                            // Получаем еще один ответ
+                                            b = recv(s, buf, sizeof(buf), 0);
+                                            if (b > 12) {
+                                                string legacyRes(buf + 12, b - 12);
+                                                string legacyImg = ExtractXMLAttr(legacyRes, "screenshot", "image");
+                                                if (!legacyImg.empty()) {
+                                                     string outName = "screenshot.jpg";
+                                                     if (argc > 3) outName = argv[3];
+                                                     vector<unsigned char> jpg = Base64Decode(legacyImg);
+                                                     ofstream outFile(outName, ios::binary);
+                                                     outFile.write((const char*)jpg.data(), jpg.size());
+                                                     outFile.close();
+                                                     cout << "[Success] Screenshot (Legacy) saved to: " << outName << endl;
+                                                } else {
+                                                    cout << ">>> ERROR: Legacy screenshot failed too <<<" << endl;
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        cout << ">>> ERROR: No image data in response <<<" << endl;
+                                    }
+                                }
+                            } else if (mode == "scan_files" && cmdXml.find("GetFiles") != string::npos) {
+                                string type = ExtractXMLAttr(cmdXml, "in", "type");
+                                ofstream logFile("sdk_debug.log", ios::app);
+                                if (logFile.is_open()) {
+                                    logFile << "\n--- [Scan Category: " << type << "] ---\n" << finalRes << "\n-----------------------------\n" << endl;
+                                    logFile.close();
+                                }
+                                if (finalRes.find("<file") != string::npos) {
+                                    cout << "[Found] Files found in category " << type << " (check sdk_debug.log for details)" << endl;
+                                } else {
+                                    cout << "[Empty] Category " << type << " is empty." << endl;
+                                }
+                            } else if (mode == "raw_cmd") {
+                                ofstream logFile("sdk_debug.log", ios::app);
+                                if (logFile.is_open()) {
+                                    logFile << "\n--- [Raw CMD: " << argv[3] << "] ---\n" << finalRes << "\n-----------------------------\n" << endl;
+                                    logFile.close();
+                                    cout << "[Debug] Raw result saved to sdk_debug.log" << endl;
+                                }
+                                cout << ">>> RESPONSE <<<" << endl << finalRes << endl;
                             } else if (cmdXml.find("GetLuminancePloy") != string::npos) {
                                 string curBright = ExtractXMLAttr(finalRes, "default", "value");
                                 cout << "[Brightness] Current level: " << curBright << "%" << endl;

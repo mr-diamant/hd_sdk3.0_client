@@ -32,6 +32,12 @@
 .\HDServerConfig.exe list_files 192.168.8.2
 ```
 
+### Захват экрана (Скриншот)
+```powershell
+.\HDServerConfig.exe screenshot 192.168.8.2
+```
+*Изображение будет сохранено в файл screenshot.jpg*
+
 ### Установка адреса Cloud Server
 ```powershell
 .\HDServerConfig.exe set 192.168.8.2 77.42.66.37 10001
