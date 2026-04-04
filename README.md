@@ -27,6 +27,11 @@
 .\HDServerConfig.exe verify 192.168.8.2
 ```
 
+### Список файлов на устройстве
+```powershell
+.\HDServerConfig.exe list_files 192.168.8.2
+```
+
 ### Установка адреса Cloud Server
 ```powershell
 .\HDServerConfig.exe set 192.168.8.2 77.42.66.37 10001
@@ -55,6 +60,11 @@
 
 # Получить текущую яркость
 .\HDServerConfig.exe bright -get 192.168.8.2
+```
+
+### Информация о железе
+```powershell
+.\HDServerConfig.exe hw_info 192.168.8.2
 ```
 
 ### Выполнение кастомного XML шаблона

@@ -246,7 +246,8 @@ int main(int argc, char* argv[]) {
         cout << "HDServerConfig - LED Controller Management Utility (HD-A3L / SDK 3.0)" << endl;
         cout << "Usage: HDServerConfig.exe <command> <controller_ip> [params...]" << endl << endl;
         cout << "Commands:" << endl;
-        cout << "  verify <IP>\t\t\tGet device info, model, and current server settings" << endl;
+        cout << "  verify <IP>\t\t\tGet full device info (Model, RAM, Flash, Version, Server)" << endl;
+        cout << "  list_files <IP>\t\tList all files (images, videos, fonts, etc.)" << endl;
         cout << "  set <IP> <ServerIP> <Port>\tSet the Cloud Server IP and Port" << endl;
         cout << "  reboot <IP>\t\t\tReboot the controller" << endl;
         cout << "  on/off <IP>\t\t\tTurn screen ON or OFF" << endl;
@@ -272,9 +273,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         controllerIp = argv[3];
-    } else if (mode == "on" || mode == "off") {
+    } else if (mode == "on" || mode == "off" || mode == "list_files") {
         if (argc < 3) {
-            cout << "Usage: HDServerConfig.exe on/off <controller_ip>" << endl;
+            cout << "Usage: HDServerConfig.exe " << mode << " <controller_ip>" << endl;
             return 1;
         }
         controllerIp = argv[2];
@@ -372,6 +373,8 @@ int main(int argc, char* argv[]) {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"OpenScreen\"></in></sdk>");
         } else if (mode == "off") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"CloseScreen\"></in></sdk>");
+        } else if (mode == "list_files") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetFiles\"></in></sdk>");
         } else if (mode == "bright") {
             string val = argv[2];
             if (val == "-get") {
@@ -540,11 +543,57 @@ int main(int argc, char* argv[]) {
                                 string devCpu = ExtractXMLAttr(finalRes, "device", "cpu");
                                 string outWidth = ExtractXMLAttr(finalRes, "screen", "width");
                                 string outHeight = ExtractXMLAttr(finalRes, "screen", "height");
-                                cout << "[Device Info] Model: " << devId << " (CPU: " << devCpu << ")" << endl;
-                                cout << "[Screen Size] " << outWidth << "x" << outHeight << endl;
+                                
+                                string ram = ExtractXMLAttr(finalRes, "memory", "size");
+                                string fFree = ExtractXMLAttr(finalRes, "flash", "free");
+                                string fTotal = ExtractXMLAttr(finalRes, "flash", "total");
+                                string softVer = ExtractXMLAttr(finalRes, "version", "value");
+                                if (softVer.empty()) softVer = ExtractXMLAttr(finalRes, "version", "software");
+
+                                cout << "[Device Info]" << endl;
+                                cout << "  Model/CPU: " << devId << " (CPU: " << devCpu << ")" << endl;
+                                cout << "  Screen:    " << outWidth << "x" << outHeight << endl;
+                                if (!ram.empty())     cout << "  RAM Size:  " << ram << " MB" << endl;
+                                if (!fFree.empty())   cout << "  Flash:     " << fFree << "/" << fTotal << " MB (Free/Total)" << endl;
+                                if (!softVer.empty()) cout << "  SW Ver:    " << softVer << endl;
                             } else if (cmdXml.find("GetDeviceName") != string::npos) {
                                 string devName = ExtractXMLAttr(finalRes, "name", "value");
                                 cout << "[Device Name] " << devName << endl;
+                            } else if (cmdXml.find("GetFiles") != string::npos) {
+                                cout << "[Files List]" << endl;
+                                cout << left << setw(30) << "Name" << setw(12) << "Size(KB)" << setw(10) << "Type" << "MD5" << endl;
+                                cout << string(80, '-') << endl;
+
+                                size_t pos = 0;
+                                int count = 0;
+                                while ((pos = finalRes.find("<file ", pos)) != string::npos) {
+                                    size_t endPos = finalRes.find("/>", pos);
+                                    if (endPos == string::npos) break;
+                                    string fileTag = finalRes.substr(pos, endPos - pos + 2);
+
+                                    string name = ExtractXMLAttr(fileTag, "file", "name");
+                                    string size = ExtractXMLAttr(fileTag, "file", "size");
+                                    string type = ExtractXMLAttr(fileTag, "file", "type");
+                                    string md5 = ExtractXMLAttr(fileTag, "file", "md5");
+
+                                    // Расшифровка типов
+                                    string typeStr = "Other";
+                                    if (type == "0") typeStr = "Image";
+                                    else if (type == "1") typeStr = "Video";
+                                    else if (type == "2") typeStr = "Font";
+                                    else if (type == "3") typeStr = "Firmware";
+                                    else if (type == "4") typeStr = "FPGA";
+                                    else if (type == "5") typeStr = "Config";
+                                    else if (type == "6") typeStr = "Resources";
+
+                                    long sizeKb = (size.empty() ? 0 : stol(size)) / 1024;
+                                    cout << left << setw(30) << name << setw(12) << sizeKb << setw(10) << typeStr << md5 << endl;
+                                    
+                                    pos = endPos;
+                                    count++;
+                                }
+                                if (count == 0) cout << "(No files found)" << endl;
+                                else cout << "Total files: " << count << endl;
                             } else if (cmdXml.find("GetLuminancePloy") != string::npos) {
                                 string curBright = ExtractXMLAttr(finalRes, "default", "value");
                                 cout << "[Brightness] Current level: " << curBright << "%" << endl;
