@@ -41,3 +41,23 @@
 ```powershell
 .\HDServerConfig.exe reboot 192.168.8.2
 ```
+
+### Управление питанием экрана (Вкл/Выкл)
+```powershell
+.\HDServerConfig.exe on 192.168.8.2
+.\HDServerConfig.exe off 192.168.8.2
+```
+
+### Управление яркостью
+```powershell
+# Установить яркость (например, 50%)
+.\HDServerConfig.exe bright -50 192.168.8.2
+
+# Получить текущую яркость
+.\HDServerConfig.exe bright -get 192.168.8.2
+```
+
+### Выполнение кастомного XML шаблона
+```powershell
+.\HDServerConfig.exe exec_template 192.168.8.2 template.xml
+```

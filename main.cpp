@@ -4,6 +4,8 @@
 #include <winsock2.h>
 #include <windows.h>
 #include <iomanip>
+#include <fstream>
+#include <sstream>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -247,10 +249,9 @@ int main(int argc, char* argv[]) {
         cout << "  verify <IP>\t\t\tGet device info, model, and current server settings" << endl;
         cout << "  set <IP> <ServerIP> <Port>\tSet the Cloud Server IP and Port" << endl;
         cout << "  reboot <IP>\t\t\tReboot the controller" << endl;
-        cout << "  add_program <IP>\t\tSend an example program (text) to the screen" << endl;
-        cout << "  clear <IP>\t\t\tClear all programs from the screen" << endl;
-        cout << "  screen_off <IP>\t\tTurn off the LED screen" << endl;
-        cout << "  screen_on <IP>\t\tTurn on the LED screen" << endl;
+        cout << "  on/off <IP>\t\t\tTurn screen ON or OFF" << endl;
+        cout << "  bright <-percent|-get> <IP>\tSet (-50) or Get (-get) brightness level" << endl;
+        cout << "  exec_template <IP> <File>\tExecute any custom XML template from the xml_templates folder" << endl;
         cout << "  json_verify <IP>\t\t[Deprecated] Run the internal Port 10001 JSON verification" << endl;
         return 0;
     }
@@ -261,9 +262,31 @@ int main(int argc, char* argv[]) {
     }
 
     string mode = argv[1];
-    string controllerIp = argv[2];
-    string serverIp = (argc > 3) ? argv[3] : "";
-    int serverPort = (argc > 4) ? stoi(argv[4]) : 0;
+    string controllerIp;
+    string serverIp = "";
+    int serverPort = 0;
+
+    if (mode == "bright") {
+        if (argc < 4) {
+            cout << "Usage: HDServerConfig.exe bright <-percent|-get> <controller_ip>" << endl;
+            return 1;
+        }
+        controllerIp = argv[3];
+    } else if (mode == "on" || mode == "off") {
+        if (argc < 3) {
+            cout << "Usage: HDServerConfig.exe on/off <controller_ip>" << endl;
+            return 1;
+        }
+        controllerIp = argv[2];
+    } else {
+        if (argc < 3) {
+            cout << "Usage: HDServerConfig.exe <command> <controller_ip> [params...]\nRun 'HDServerConfig.exe --help' for a full list of commands." << endl;
+            return 1;
+        }
+        controllerIp = argv[2];
+        serverIp = (argc > 3) ? argv[3] : "";
+        serverPort = (argc > 4) ? stoi(argv[4]) : 0;
+    }
 
     WSADATA wsaData;
     WSAStartup(MAKEWORD(2, 2), &wsaData);
@@ -345,41 +368,48 @@ int main(int argc, char* argv[]) {
 
         if (mode == "reboot") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"Reboot\" delay=\"0\"></in></sdk>");
+        } else if (mode == "on") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"OpenScreen\"></in></sdk>");
+        } else if (mode == "off") {
+            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"CloseScreen\"></in></sdk>");
+        } else if (mode == "bright") {
+            string val = argv[2];
+            if (val == "-get") {
+                commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetLuminancePloy\"></in></sdk>");
+            } else {
+                // Если передано -50, убираем минус
+                if (val[0] == '-') val = val.substr(1);
+                commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SetLuminancePloy\"><mode value=\"default\"/><default value=\"" + val + "\"/><ploy><item enable=\"false\" percent=\"" + val + "\" start=\"00:00:00\"/></ploy><sensor max=\"100\" min=\"1\" time=\"5\"/></in></sdk>");
+            }
         } else if (mode == "set") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SetSDKTcpServer\"><server port=\"" + to_string(serverPort) + "\" host=\"" + serverIp + "\"/></in></sdk>");
         } else if (mode == "verify") {
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetSDKTcpServer\"></in></sdk>");
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceInfo\"></in></sdk>");
             commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"GetDeviceName\"></in></sdk>");
-        } else if (mode == "add_program") {
-            // Тестируем точную структуру из примера документации
-            string addProgXml = XML_DECL + "<sdk guid=\"" + g_guid + "\">"
-                                "<in method=\"AddProgram\">"
-                                "<screen timeStamps=\"0\">"
-                                "<program guid=\"prog-1234\" type=\"normal\">"
-                                "<backgroundMusic/>"
-                                "<playControl count=\"1\" disabled=\"false\"/>"
-                                "<area alpha=\"255\" guid=\"area-1234\">"
-                                "<rectangle x=\"0\" height=\"128\" width=\"128\" y=\"0\"/>"
-                                "<resources>"
-                                "<text guid=\"text-1234\" singleLine=\"false\">"
-                                "<style valign=\"middle\" align=\"center\"/>"
-                                "<string>Example</string>"
-                                "<font name=\"SimSun\" italic=\"false\" bold=\"false\" underline=\"false\" size=\"28\" color=\"#ffffff\"/>"
-                                "</text>"
-                                "</resources>"
-                                "</area>"
-                                "</program>"
-                                "</screen>"
-                                "</in>"
-                                "</sdk>";
-            commands.push_back(addProgXml);
-        } else if (mode == "clear") {
-            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"ClearProgram\"></in></sdk>");
-        } else if (mode == "screen_on") {
-            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SwitchScreen\"><screen on=\"true\"/></in></sdk>");
-        } else if (mode == "screen_off") {
-            commands.push_back(XML_DECL + "<sdk guid=\"" + g_guid + "\"><in method=\"SwitchScreen\"><screen on=\"false\"/></in></sdk>");
+        } else if (mode == "exec_template") {
+            string filename = (argc > 3) ? argv[3] : "";
+            if (filename.empty()) {
+                cerr << "Error: No XML file specified for send_xml mode!" << endl;
+            } else {
+                ifstream file(filename);
+                if (!file.is_open()) {
+                    cerr << "Error: Could not open file " << filename << endl;
+                } else {
+                    stringstream buffer;
+                    buffer << file.rdbuf();
+                    string payload = buffer.str();
+                    
+                    // Заменяем универсальный маркер на реальный токен сессии
+                    string search = "##SESSION_GUID##";
+                    size_t pos = 0;
+                    while ((pos = payload.find(search, pos)) != string::npos) {
+                        payload.replace(pos, search.length(), g_guid);
+                        pos += g_guid.length();
+                    }
+                    commands.push_back(payload);
+                }
+            }
         } else if (mode == "json_verify") {
             // ЭТАП 1: АВТОРИЗАЦИЯ (Подделка под HDPlayer)
             string loginJson = "{\r\n"
@@ -515,6 +545,9 @@ int main(int argc, char* argv[]) {
                             } else if (cmdXml.find("GetDeviceName") != string::npos) {
                                 string devName = ExtractXMLAttr(finalRes, "name", "value");
                                 cout << "[Device Name] " << devName << endl;
+                            } else if (cmdXml.find("GetLuminancePloy") != string::npos) {
+                                string curBright = ExtractXMLAttr(finalRes, "default", "value");
+                                cout << "[Brightness] Current level: " << curBright << "%" << endl;
                             } else {
                                 cout << "[Success] Command completed." << endl;
                             }
